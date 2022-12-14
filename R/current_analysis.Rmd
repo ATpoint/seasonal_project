@@ -1,0 +1,194 @@
+---
+title: "Seasonal Project"
+subtitle: "Full Analysis Document"
+author:
+- name: Alexander Tönges
+  affiliation: Institute Of Experimental Pathology, ZMBE
+date: "`r paste('Compiled:', format(Sys.time(), '%d-%b-%Y'))`"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+    keep_md: true
+    highlight: tango
+editor_options: 
+  markdown: 
+    wrap: 120
+params:
+  cache_rebuild: FALSE
+  save: TRUE
+  save_final: TRUE
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+# Session setup
+
+Load packages, source helper script with functions and plotting defaults etc.
+
+```{r setup}
+
+# We're inside a Docker container so the directory with the data was mounted as "/projectdir"
+rootdir <- "/projectdir/" 
+
+# Read processed data from here
+dir_input <- paste0(rootdir, "/dir_inputs/"); if(!dir.exists(dir_input)) dir.create(dir_input, recursive=TRUE)
+
+# Output folder for everything
+outdir <- paste0(rootdir, "/dir_analysis/")
+
+suppressMessages({
+  library(ComplexHeatmap)
+  library(data.table)
+  library(edgeR)
+  library(ggridges)
+  library(limma)
+  library(magick); invisible(magick:::magick_threads(i=1L))
+  library(magrittr)
+  library(openxlsx)
+  library(parallel)
+  library(patchwork)
+  library(SummarizedExperiment)
+  library(tidyverse)
+})
+
+# Cores for multithreading via mclapply/biocparallel
+mc_workers <- if(Sys.info()[["sysname"]]=="Windows") 1 else round(parallel::detectCores()*.5)
+mc_workers <- if(mc_workers < 1) 1 else mc_workers
+                                                                  
+list.plots <- list()
+list.txt   <- list()
+
+# Source functions and ggplot defaults
+source(paste0(rootdir, "/seasonalProject/R/functions_plots_defaults.R"))
+
+# Set timezone
+Sys.setenv(TZ='Europe/Berlin')
+
+# Set constant seed
+Seed <- 1
+
+# The 16 core-clock genes in human and mouse
+core_genes <- S4Vectors::SimpleList()
+
+core_genes$human <- c("ENSG00000133794_ARNTL", "ENSG00000029153_ARNTL2", "ENSG00000134852_CLOCK", 
+"ENSG00000008405_CRY1", "ENSG00000121671_CRY2", "ENSG00000141551_CSNK1D", 
+"ENSG00000213923_CSNK1E", "ENSG00000165030_NFIL3", "ENSG00000126368_NR1D1", 
+"ENSG00000174738_NR1D2", "ENSG00000179094_PER1", "ENSG00000132326_PER2", 
+"ENSG00000049246_PER3", "ENSG00000069667_RORA", "ENSG00000198963_RORB", 
+"ENSG00000111602_TIMELESS")
+
+core_genes$mouse <- c("ENSMUSG00000055116_Arntl", "ENSMUSG00000040187_Arntl2", "ENSMUSG00000029238_Clock", 
+"ENSMUSG00000020038_Cry1", "ENSMUSG00000068742_Cry2", "ENSMUSG00000025162_Csnk1d", 
+"ENSMUSG00000022433_Csnk1e", "ENSMUSG00000056749_Nfil3", "ENSMUSG00000020889_Nr1d1", 
+"ENSMUSG00000021775_Nr1d2", "ENSMUSG00000020893_Per1", "ENSMUSG00000055866_Per2", 
+"ENSMUSG00000028957_Per3", "ENSMUSG00000032238_Rora", "ENSMUSG00000036192_Rorb", 
+"ENSMUSG00000039994_Timeless")
+
+```
+
+# RNA-seq cohort from human plaques
+
+## Load data 
+
+```{r tximport_qc, echo=TRUE, eval=FALSE}
+
+cohort_plaque_in <- paste0(rootdir, "/dir_inputData/cohort_munich/samples_plaque/")
+
+x_counts <- data.table::fread(paste0(cohort_plaque_in, "/counts.txt.gz"), data.table=FALSE) %>%
+            column_to_rownames("gene") %>% magrittr::set_colnames(gsub(".*Sample_", "", colnames(.)))
+
+x_length <- data.table::fread(paste0(cohort_plaque_in, "/lengths.txt.gz"), data.table=FALSE) %>%
+            column_to_rownames("gene") %>% magrittr::set_colnames(gsub(".*Sample_", "", colnames(.)))
+
+x_annot  <- openxlsx::read.xlsx(paste0(cohort_plaque_in, "/metadata.xlsx")) %>%
+            magrittr::set_colnames(c("patient", "data_id1", "stable_plaque", "data_id2", "date_of_surgery", "age", "sex",
+                                     "symptomatic", "percent_stenosis", "hypertension", "diabetes", "smoking", "dyslipidemia",
+                                     "chd", "dialysis", "asa", "height", "weight", "bmi", "sapt", "statin", "short_fu_mace"))
+
+x_txg    <- data.table::fread(paste0(cohort_plaque_in, "/tx2gene.txt.gz"), data.table=FALSE) %>%
+            dplyr::mutate(gene_id=gsub("\\..*", "", gene_id), gene=paste(gene_id, gene_name, sep="_")) %>%
+            dplyr::select(gene, gene_type) %>%
+            unique
+         
+#------------------------------------------
+# De-messification of provided metadata
+#------------------------------------------
+
+# Sanitize dates and sex
+x1 <- x_annot %>% filter(grepl("/", date_of_surgery)) %>% tidyr::separate(., sep="/", into=c("month", "day", "year"), col=date_of_surgery) %>% relocate(day, month, year)
+x2 <- x_annot %>% filter(grepl("\\.", date_of_surgery)) %>% tidyr::separate(., sep="\\.", into=c("day", "month", "year"), col=date_of_surgery) %>% relocate(day, month, year)
+x3 <- rbind(x1, x2) %>% 
+      dplyr::mutate(patient=gsub("#", "", patient),
+                    month=factor(as.numeric(gsub("^0", "", month)), levels=as.character(seq(1,12))),
+                    stable_plaque=case_when(stable_plaque=="1" ~ TRUE, stable_plaque=="0" ~ FALSE, TRUE ~ NA),
+                    sex=case_when(sex=="m" ~ "male", sex=="f" ~ "female", TRUE ~ sex),
+                    symptomatic=case_when(symptomatic=="s" ~ TRUE, symptomatic=="a" ~ FALSE, TRUE ~ NA),
+                    percent_stenosis=as.numeric(if_else(percent_stenosis=="-", NA_character_, as.character(percent_stenosis))),
+                    hypertension=tolower(hypertension), hypertension=case_when(hypertension=="yes" ~ TRUE, hypertension=="no" ~ FALSE, TRUE ~ NA),
+                    diabetes=tolower(diabetes), diabetes=case_when(diabetes=="yes" ~ TRUE, diabetes=="no" ~ FALSE, TRUE ~ NA),
+                    smoking=tolower(smoking), smoking=case_when(smoking=="yes" ~ TRUE, smoking=="no" ~ FALSE, TRUE ~ NA),
+                    dyslipidemia=tolower(dyslipidemia), dyslipidemia=case_when(dyslipidemia=="yes" ~ TRUE, dyslipidemia=="no" ~ FALSE, TRUE ~ NA),
+                    chd=tolower(chd), chd=case_when(chd=="yes" ~ TRUE, chd=="no" ~ FALSE, TRUE ~ NA),
+                    dialysis=tolower(dialysis), dialysis=case_when(dialysis=="yes" ~ TRUE, dialysis=="no" ~ FALSE, TRUE ~ NA),
+                    asa=as.numeric(case_when(asa %in% as.character(1:6) ~ asa, TRUE ~ NA_character_)),
+                    height=as.numeric(case_when(height=="-" | height=="" ~ NA_character_, TRUE ~ height)),
+                    weight=gsub("^0", "", weight), weight=as.numeric(case_when(weight=="-" ~ NA_character_, TRUE ~ weight)),
+                    bmi=round(10000*weight/(height)^2, 2),
+                    sapt=tolower(sapt), sapt=case_when(sapt=="yes" ~ TRUE, sapt=="no" ~ FALSE, TRUE ~ NA),
+                    statin=tolower(statin), statin=case_when(statin=="yes" ~ TRUE, statin=="no" ~ FALSE, TRUE ~ NA),
+                    short_fu_mace=tolower(short_fu_mace), short_fu_mace=case_when(short_fu_mace=="yes" ~ TRUE, short_fu_mace=="no" ~ FALSE, TRUE ~ NA))
+
+x_keep <- intersect(colnames(x_counts), x3$data_id1)
+
+x_coldata <- x3 %>% dplyr::filter(data_id1 %in% x_keep) %>% mutate(x=data_id1) %>% tibble::column_to_rownames("x")
+
+x_rowdata <- data.frame(gene=rownames(x_counts)) %>% 
+             dplyr::mutate(gene_id=gsub("\\..*", "", gene),
+                           gene_name=gsub(".*_", "", gene),
+                           gene=paste(gene_id, gene_name, sep="_"),
+                           x=gene) %>%
+             dplyr::left_join(x=., y=x_txg[,c("gene", "gene_type")], by="gene") %>%
+             tibble::column_to_rownames("x") %>%
+             dplyr::rename(gene_biotype=gene_type)
+
+x_counts <- x_counts[,x_keep] %>% magrittr::set_rownames(x_rowdata$gene)
+x_length <- x_length[,x_keep] %>% magrittr::set_rownames(x_rowdata$gene)
+  
+# As SummarizedExperiment
+se_plaque <- SummarizedExperiment(assays=list(counts=x_counts, aveTxLength=x_length))
+colData(se_plaque) <- DataFrame(x_coldata)
+rowData(se_plaque) <- DataFrame(x_rowdata)
+
+# Save the counts and row/colData as text so downstream analysis can start from that
+bname <- paste0(dir_input, "/cohortPlaque")
+
+data.table::fwrite(x=data.frame(colData(se_plaque)), file=paste0(bname, "__coldata.tsv.gz"),
+                   col.names=TRUE, row.names=FALSE, sep="\t", quote=FALSE, compress="gzip")
+
+data.table::fwrite(x=data.frame(rowData(se_plaque)), file=paste0(bname, "__rowdata.tsv.gz"),
+                   col.names=TRUE, row.names=FALSE, sep="\t", quote=FALSE, compress="gzip")
+
+data.table::fwrite(x=data.frame(assay(se_plaque, "counts")), file=paste0(bname, "__counts.tsv.gz"),
+                   col.names=TRUE, row.names=FALSE, sep="\t", quote=FALSE, compress="gzip", nThread=mc_workers)
+
+data.table::fwrite(x=data.frame(assay(se_plaque, "aveTxLength")), file=paste0(bname, "__aveTxLength.tsv.gz"),
+                   col.names=TRUE, row.names=FALSE, sep="\t", quote=FALSE, compress="gzip", nThread=mc_workers)
+
+saveRDS(se_plaque, paste0(outdir, "/rdata/se_plaque.rds"))
+
+rm(list=ls(pattern="^x"))
+
+save.image(paste0(outdir, "/rdata/tmp1.rdata"))
+
+```
+
+# Save
+
+```{r save}
+
+sessionInfo()
+
+```
