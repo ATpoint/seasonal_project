@@ -33,5 +33,5 @@ docker run -d -p 8787:8787 \
   -v "/home/atpoint/expatspace/projects/seasonal_project/":/projectdir \
   -e PASSWORD=sudo_drink_tequila \
   -e ROOT=TRUE \
-  atpoint/seasonal:1.8
+  atpoint/seasonal:0.9
 ```

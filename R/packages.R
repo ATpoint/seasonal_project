@@ -17,11 +17,11 @@ if(1 > 2){
                   "ComplexHeatmap",
                   "colorspace",
                   "cowplot",
-                  "atpoint/CreateGeneSignatures",
                   "data.table",
                   "DESeq2",
                   "DropletUtils",
                   "edgeR",
+                  "fgsea",
                   "fmsb",
                   "genomation",
                   "GenomicRanges",
@@ -51,12 +51,12 @@ if(1 > 2){
                   "PCAtools",
                   "ReactomeContentService4R",
                   "reshape2",
-                  "rmdformats",
-                  "cran/RobustRankAggreg",
+                  "RobustRankAggreg",
                   "rtracklayer",
                   "RUVSeq",
                   "S4Vectors",
                   "scater",
+                  "scDblFinder",
                   "scran",
                   "scuttle",
                   "SingleCellExperiment",
@@ -71,24 +71,23 @@ if(1 > 2){
                   "UpSetR",
                   "uwot",
                   "viridis",
-                  "atpoint/vizzy",
                   "xfun",
-                  "writexl")
+                  "writexl",
+                  #
+                  "atpoint/CreateGeneSignatures",
+                  "atpoint/vizzy")
   
-  pak::pkg_install(to_install, ask=FALSE, lib="/r_user_lib/")
+  options(repos=c(CRAN="https://cloud.r-project.org"))
   
-  # from GitHub directly as repo versions had any sort of issue
-  remotes::install_github("https://github.com/plger/scDblFinder")
-  remotes::install_github("https://github.com/stephenslab/mixsqp")
-  remotes::install_github("https://github.com/ctlab/fgsea")
+  pak::pkg_install(to_install)
+  pak::pak_cleanup()
   
-  #/ lockfile with renv for reproduction outside the container
+  # lockfile with renv for reproduction outside the container
   renv::snapshot(packages=rownames(installed.packages()),
                  lockfile="/r_user_lib/lockfile_current.json",
                  prompt=FALSE)
   
-  file.copy("/r_user_lib/lockfile_current.json", 
-            "/projectdir/circadian_project/R/lockfile_current.json", 
+  file.copy("/r_user_lib/lockfile_current.json", "/projectdir/seasonalProject/R/lockfile_current.json", 
             overwrite=TRUE)
   
 }

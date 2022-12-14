@@ -2,6 +2,7 @@ FROM bioconductor/bioconductor_docker:RELEASE_3_16
 
 RUN mkdir /r_user_lib/ && chown -c rstudio /r_user_lib/
 ENV R_LIBS_USER=/r_user_lib/
+ENV R_BIOC_VERSION=3.16
 
 COPY rserver.conf /etc/rstudio/rserver.conf
 COPY rprofile.R /home/rstudio/.Rprofile
