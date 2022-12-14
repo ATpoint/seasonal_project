@@ -1,0 +1,6 @@
+to_review
+renv
+.renv
+.DS_Store
+foo*
+*.html
